@@ -11,6 +11,10 @@ LOGGER = logging.getLogger(__name__)
 # Same protocolCode is used by the linked-go/AquaTemp control endpoint.
 POWER_CODE = "Power"
 
+# EXPERIMENTAL: H36 = "Enable Weather Comp" (1 = on, 0 = off). Verified as the code that
+# flips when weather compensation is toggled in the WarmLink app.
+WEATHER_COMP_CODE = "H36"
+
 
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up WarmLink switch entities."""
@@ -25,6 +29,9 @@ async def async_setup_entry(hass, entry, async_add_entities):
         # cooling function must be an explicit two-step act, so a stray tap on
         # the thermostat card can never start cooling on uninsulated pipes.
         entities.append(WarmlinkCoolingFunctionSwitch(coordinator, entry))
+    # EXPERIMENTAL: weather compensation on/off (H36). Only on units that report it.
+    if coordinator.value(WEATHER_COMP_CODE) is not None:
+        entities.append(WarmlinkWeatherCompSwitch(coordinator, entry))
     async_add_entities(entities)
     LOGGER.info("WarmLink: Added %d switch(es)", len(entities))
 
@@ -148,4 +155,35 @@ class WarmlinkCoolingFunctionSwitch(WarmlinkPowerSwitch):
         value = "1" if turn_on else "0"
         LOGGER.info(f"WarmLink: Requesting cooling function H05={value}")
         await self.coordinator.api.set_value(device_code, COOLING_FUNCTION_CODE, value)
+        await self.coordinator.async_request_refresh()
+
+
+class WarmlinkWeatherCompSwitch(WarmlinkPowerSwitch):
+    """EXPERIMENTAL: enable/disable weather (AT) compensation (H36)."""
+
+    def __init__(self, coordinator, entry):
+        """Initialize the switch."""
+        super().__init__(coordinator, entry)
+        self._attr_unique_id = f"{entry.entry_id}_weather_comp_switch"
+        self._attr_name = "Weather Compensation"
+        self._attr_icon = "mdi:chart-bell-curve-cumulative"
+
+    def _power_value(self):
+        """Return the raw H36 value (overrides the Power lookup)."""
+        if self.coordinator.data:
+            for item in self.coordinator.data:
+                if item.get("code") == WEATHER_COMP_CODE:
+                    return item.get("value")
+        return None
+
+    async def _set_power(self, turn_on: bool) -> None:
+        """Write H36 instead of Power."""
+        device_code = (self.coordinator.device_info or {}).get("device_code")
+        if not device_code:
+            LOGGER.error("WarmLink: No device_code available, cannot set weather compensation")
+            return
+        value = "1" if turn_on else "0"
+        LOGGER.warning("WarmLink: (experimental) requesting weather compensation H36=%s", value)
+        resp = await self.coordinator.api.set_value(device_code, WEATHER_COMP_CODE, value)
+        LOGGER.warning("WarmLink: (experimental) H36=%s response: %s", value, resp)
         await self.coordinator.async_request_refresh()
