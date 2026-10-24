@@ -17,11 +17,22 @@ CURVE_NUMBERS = [
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up the experimental curve numbers (only on units that report H36)."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    if coordinator.value("H36") is None:
-        return
-    async_add_entities(
-        WarmlinkCurveNumber(coordinator, entry, *spec) for spec in CURVE_NUMBERS
-    )
+    entities = []
+    if coordinator.value("H36") is not None:
+        entities.extend(WarmlinkCurveNumber(coordinator, entry, *spec) for spec in CURVE_NUMBERS)
+    # EXPERIMENTAL: fan-coil units (e.g. TC Swiss Breeze PFP-D) are neither detected as a
+    # heat pump nor as a radiator, so they get no heating-target control. They do report
+    # the heating target R02 (device range 8-30 degC), so expose it as a number.
+    if (
+        not getattr(coordinator, "is_heat_pump", False)
+        and not getattr(coordinator, "is_radiator", False)
+        and coordinator.value("R02") is not None
+    ):
+        entities.append(WarmlinkCurveNumber(
+            coordinator, entry, "R02", "Heating Target", 8.0, 30.0, 0.5, "\u00b0C", "mdi:fire",
+        ))
+    if entities:
+        async_add_entities(entities)
 
 
 class WarmlinkCurveNumber(CoordinatorEntity, NumberEntity):
@@ -82,7 +93,7 @@ class WarmlinkCurveNumber(CoordinatorEntity, NumberEntity):
         if not device_code:
             LOGGER.error("WarmLink: No device_code available, cannot set %s", self._code)
             return
-        out = f"{value:.1f}" if self._attr_native_step < 1 else str(int(round(value)))
+        out = f"{value:.1f}" if self._attr_native_step < 1 else str(int(round(value)))  # R02 uses 0.5 steps
         LOGGER.warning("WarmLink: (experimental) requesting %s=%s", self._code, out)
         resp = await self.coordinator.api.set_value(device_code, self._code, out)
         LOGGER.warning("WarmLink: (experimental) %s=%s response: %s", self._code, out, resp)
