@@ -83,23 +83,39 @@ COMP_FREQ_MAX = 90
 async def async_setup_entry(hass, entry, async_add_entities):
     """Set up WarmLink number entities."""
     coordinator = hass.data[DOMAIN][entry.entry_id]
-    entities = [
-        WarmlinkWeatherCompOffsetNumber(coordinator, entry),
-        WarmlinkWeatherCompSlopeNumber(coordinator, entry),
-        WarmlinkCircPumpModeNumber(coordinator, entry),
-        WarmlinkPowerOnDiffHeatingNumber(coordinator, entry),
-        WarmlinkStandbyDiffHeatingNumber(coordinator, entry),
-    ]
-    entities += [
-        WarmlinkCompFreqNumber(coordinator, entry, code, name, uid)
-        for code, name, uid in COMP_FREQ_SPECS
-    ]
-    async_add_entities(entities)
-    LOGGER.info(
-        "WarmLink: Added weather-comp offset + slope + P01 pump-mode + R04/R05 "
-        "heating-hysteresis + %d comp-freq (C-group, 30-90 Hz clamp) numbers",
-        len(COMP_FREQ_SPECS),
-    )
+    entities = []
+    is_heat_pump = getattr(coordinator, "is_heat_pump", False)
+    is_radiator = getattr(coordinator, "is_radiator", False)
+
+    # agor fork: the curve / pump / hysteresis / compressor numbers only make
+    # sense on the heat pump itself. Upstream v79.0 adds them to every entry,
+    # which on fan-coil entries (TC Swiss Breeze) would create compressor
+    # controls for a device that has no compressor, and R05 means something
+    # else on LinkedGo terminal units. Gated on H36 (weather-comp enable), the
+    # same gate v78.0-agor.1 used and that is proven to match only the main unit.
+    if coordinator.value("H36") is not None:
+        entities += [
+            WarmlinkWeatherCompOffsetNumber(coordinator, entry),
+            WarmlinkWeatherCompSlopeNumber(coordinator, entry),
+            WarmlinkCircPumpModeNumber(coordinator, entry),
+            WarmlinkPowerOnDiffHeatingNumber(coordinator, entry),
+            WarmlinkStandbyDiffHeatingNumber(coordinator, entry),
+        ]
+        entities += [
+            WarmlinkCompFreqNumber(coordinator, entry, code, name, uid)
+            for code, name, uid in COMP_FREQ_SPECS
+        ]
+
+    # agor fork: fan-coil units (e.g. TC Swiss Breeze PFP-D) are detected as
+    # neither a heat pump nor a radiator, so they get no heating-target control.
+    # They do report the heating target R02 (device range 8-30 degC).
+    # unique_id kept identical to v78.0-agor.1 so existing entity IDs survive.
+    if not is_heat_pump and not is_radiator and coordinator.value("R02") is not None:
+        entities.append(WarmlinkFanCoilHeatingTargetNumber(coordinator, entry))
+
+    if entities:
+        async_add_entities(entities)
+    LOGGER.info("WarmLink: Added %d number entities", len(entities))
 
 
 class _WarmlinkBaseNumber(CoordinatorEntity, NumberEntity):
@@ -371,3 +387,30 @@ class WarmlinkCompFreqNumber(_WarmlinkBaseNumber):
         if raw is not None and "." in str(raw):
             return f"{n}.0"
         return str(n)
+
+
+class WarmlinkFanCoilHeatingTargetNumber(_WarmlinkBaseNumber):
+    """agor fork: heating target (``R02``) for fan-coil units.
+
+    TC Swiss Breeze (PFP-D) fan coils are detected as neither a heat pump nor a
+    radiator, so no climate/water-heater entity is created for them. They do
+    report R02 (heating target, device range 8-30 degC, 0.5 steps).
+    """
+
+    _code = "R02"
+    _attr_name = "Heating Target"
+    _attr_icon = "mdi:fire"
+    _attr_native_min_value = 8.0
+    _attr_native_max_value = 30.0
+    _attr_native_step = 0.5
+    _attr_native_unit_of_measurement = "°C"
+
+    def __init__(self, coordinator, entry):
+        """Initialize the fan-coil heating target number."""
+        super().__init__(coordinator, entry)
+        # Same unique_id as v78.0-agor.1 -> the existing entity IDs are kept.
+        self._attr_unique_id = f"{entry.entry_id}_R02_number"
+
+    def _format(self, value: float) -> str:
+        """Half-degree steps, one decimal (e.g. 21.5)."""
+        return f"{round(value * 2) / 2:.1f}"
